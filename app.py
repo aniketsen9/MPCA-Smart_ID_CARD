@@ -90,6 +90,15 @@ def scan_qr_from_webcam(camera_index=0):
     cv2.destroyAllWindows()
     return scanned_value
 
+#avoid duplicate
+def has_already_marked(cursor, student_id, subject):
+    today = datetime.now().date()
+    # Assuming you have an 'attendance_logs' table with columns: student_id, subject, date
+    cursor.execute("""
+        SELECT id FROM attendance_logs 
+        WHERE student_id = %s AND subject_name = %s AND log_date = %s
+    """, (student_id, subject, today))
+    return cursor.fetchone() is not None
 
 # ─────────────────────────────────────────────
 # DB HELPERS
@@ -120,7 +129,7 @@ def get_current_classes(cursor, department):
         start_dt = datetime.combine(now.date(), (datetime.min + start).time())
         end_dt = datetime.combine(now.date(), (datetime.min + end).time())
 
-        late_limit = start_dt + timedelta(minutes=15)
+        late_limit = start_dt + timedelta(minutes=80)
 
         # Case 1: within 15 min → allowed
         if start_dt <= now <= late_limit:
@@ -229,10 +238,26 @@ def process_scan(scanned_value):
 
         active_subjects, late_subjects = get_current_classes(cursor, department)
 
+        # Inside process_scan(scanned_value):
         if active_subjects:
-            print(f"[Timetable] Active class(es): {', '.join(active_subjects)}")
-            updated_subjects = mark_attendance(cursor, student[0], active_subjects, department)
-            conn.commit()
+            # Filter out subjects where attendance was already marked today
+            valid_to_mark = [s for s in active_subjects if not has_already_marked(cursor, student[0], s)]
+            
+            if not valid_to_mark:
+                print("[!] Attendance already recorded for today's active session.")
+                updated_subjects = []
+            else:
+                print(f"[Timetable] Active class(es): {', '.join(valid_to_mark)}")
+                updated_subjects = mark_attendance(cursor, student[0], valid_to_mark, department)
+                
+                # IMPORTANT: Log this session so has_already_marked works next time
+                for sub in updated_subjects:
+                    cursor.execute("""
+                        INSERT INTO attendance_logs (student_id, subject_name, log_date)
+                        VALUES (%s, %s, %s)
+                    """, (student[0], sub, datetime.now().date()))
+                
+                conn.commit()
 
         elif late_subjects:
             print(f"[Timetable] ⚠ Late for class: {', '.join(late_subjects)}")
